@@ -168,3 +168,65 @@ where
         .await?;
     Ok(())
 }
+
+pub fn copypart<I, O>(partnumber: i32, input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
+where
+    I: Read + SeekForward,
+    O: Write + SeekForward,
+{
+
+    println!("SPAAAACE 2");
+
+    //let lb_size = disk::DEFAULT_SECTOR_SIZE;//map.block_size();
+    //let diskpath = Path::new("/dev/sdz");
+
+    //let hdr = header::read_header_from_arbitrary_device(input, lb_size).unwrap();
+    //let partitions = partition::read_partitions(diskpath, &hdr, lb_size).unwrap();
+
+    //println!("{:#?}", partitions);
+
+    Ok(())
+/*
+    let mut hasher = match map.checksum_type() {
+        HashType::Sha256 => Sha256::new(),
+    };
+
+    let mut v = Vec::new();
+    // TODO benchmark a reasonable size for this
+    v.resize(8 * 1024 * 1024, 0);
+
+    let buf = v.as_mut_slice();
+    let mut position = 0;
+    for range in map.block_map() {
+        let forward = range.offset() - position;
+        input.seek_forward(forward).map_err(CopyError::ReadError)?;
+        output
+            .seek_forward(forward)
+            .map_err(CopyError::WriteError)?;
+
+        let mut left = range.length() as usize;
+        while left > 0 {
+            let toread = left.min(buf.len());
+            let r = input
+                .read(&mut buf[0..toread])
+                .map_err(CopyError::ReadError)?;
+            if r == 0 {
+                return Err(CopyError::UnexpectedEof);
+            }
+            hasher.update(&buf[0..r]);
+            output
+                .write_all(&buf[0..r])
+                .map_err(CopyError::WriteError)?;
+            left -= r;
+        }
+        let digest = hasher.finalize_reset();
+        if range.checksum().as_slice() != digest.as_slice() {
+            return Err(CopyError::ChecksumError);
+        }
+
+        position = range.offset() + range.length();
+    }
+
+    Ok(())
+    */
+}
