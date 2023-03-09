@@ -7,6 +7,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, 
 use futures::TryFutureExt;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use gpt::{header, disk, partition};
 
 use std::io::Result as IOResult;
 use std::io::{Read, Seek, SeekFrom, Write};
