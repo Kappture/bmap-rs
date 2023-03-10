@@ -7,10 +7,14 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, 
 use futures::TryFutureExt;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use gpt::{header, disk, partition};
 
+use std::io::Cursor;
 use std::io::Result as IOResult;
 use std::io::{Read, Seek, SeekFrom, Write};
+
+use gpt::{header, disk, partition};
+use gpt::partition::Partition;
+use std::collections::BTreeMap;
 
 /// Trait that can only seek further forwards
 pub trait SeekForward {
@@ -47,6 +51,12 @@ pub enum CopyError {
     ChecksumError,
     #[error("Unexpected EOF on input")]
     UnexpectedEof,
+    #[error("Failed to read GPT partition table")]
+    GPTReadError,
+    #[error("GPT partition number is invalid")]
+    PartitionNumberError,
+    #[error("GPT partition number does not exist")]
+    PartitionDoesntExistError,
 }
 
 pub fn copy<I, O>(input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
@@ -170,21 +180,52 @@ where
     Ok(())
 }
 
-pub fn copypart<I, O>(partnumber: i32, input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
+pub fn get_partitions<I>(input: &mut I) -> BTreeMap<u32, Partition> //Result<BTreeMap<u32, Partition>, CopyError>
+where
+    I: Read,
+{
+    let mut v = Vec::new();
+
+    v.resize(8 * 1024 * 1024, 0);
+    let mut buf = v.as_mut_slice();
+
+    let r = input
+                .read(&mut buf)
+                .map_err(CopyError::ReadError);//?;
+    /*
+    if r == 0 {
+        return Err(CopyError::UnexpectedEof);
+    }
+    */
+
+    let mut c = Cursor::new(buf);
+
+    let lb_size = disk::DEFAULT_SECTOR_SIZE;
+
+    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
+
+    let partitions = partition::file_read_partitions(&mut c, &hdr, lb_size).unwrap();//;.map_err(CopyError::GPTReadError);
+
+    return partitions;
+}
+
+pub fn copypart<I, O>(partnumber: usize, input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
 where
     I: Read + SeekForward,
     O: Write + SeekForward,
 {
 
-    println!("SPAAAACE 2");
+    let parts = get_partitions(input);
+    println!("{:#?}", parts);
+    println!("wa");
 
-    //let lb_size = disk::DEFAULT_SECTOR_SIZE;//map.block_size();
-    //let diskpath = Path::new("/dev/sdz");
-
-    //let hdr = header::read_header_from_arbitrary_device(input, lb_size).unwrap();
-    //let partitions = partition::read_partitions(diskpath, &hdr, lb_size).unwrap();
-
-    //println!("{:#?}", partitions);
+    if parts.len() < partnumber {
+        println!("wawawa");
+        return Err(CopyError::PartitionDoesntExistError);
+    } else if partnumber == 0 {
+        println!("wawawa");
+        return Err(CopyError::PartitionNumberError);
+    }
 
     Ok(())
 /*
@@ -230,4 +271,57 @@ where
 
     Ok(())
     */
+}
+
+pub async fn copypart_async<I, O>(input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
+where
+    I: AsyncRead + AsyncSeekForward + Unpin,
+    O: AsyncWrite + AsyncSeekForward + Unpin,
+{
+    let mut hasher = match map.checksum_type() {
+        HashType::Sha256 => Sha256::new(),
+    };
+    let mut v = Vec::new();
+    // TODO benchmark a reasonable size for this
+    v.resize(8 * 1024 * 1024, 0);
+
+    let buf = v.as_mut_slice();
+    let mut position = 0;
+    for range in map.block_map() {
+        let forward = range.offset() - position;
+        input
+            .async_seek_forward(forward)
+            .map_err(CopyError::ReadError)
+            .await?;
+        output.flush().map_err(CopyError::WriteError).await?;
+        output
+            .async_seek_forward(forward)
+            .map_err(CopyError::WriteError)
+            .await?;
+
+        let mut left = range.length() as usize;
+        while left > 0 {
+            let toread = left.min(buf.len());
+            let r = input
+                .read(&mut buf[0..toread])
+                .map_err(CopyError::ReadError)
+                .await?;
+            if r == 0 {
+                return Err(CopyError::UnexpectedEof);
+            }
+            hasher.update(&buf[0..r]);
+            output
+                .write_all(&buf[0..r])
+                .await
+                .map_err(CopyError::WriteError)?;
+            left -= r;
+        }
+        let digest = hasher.finalize_reset();
+        if range.checksum().as_slice() != digest.as_slice() {
+            return Err(CopyError::ChecksumError);
+        }
+
+        position = range.offset() + range.length();
+    }
+    Ok(())
 }

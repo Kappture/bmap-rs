@@ -30,7 +30,7 @@ struct Copy {
 
 #[derive(Debug)]
 struct CopyPart {
-    partnumber: i32,
+    partnumber: usize,
     image: Image,
     dest: PathBuf,
     nobmap: bool,
@@ -99,7 +99,7 @@ impl Opts {
             Some(("copy-part", sub_matches)) => Opts {
                 command: Subcommand::CopyPart({
                     CopyPart {
-                        partnumber: sub_matches.get_one::<String>("PARTNUMBER").unwrap().parse::<i32>().unwrap(),
+                        partnumber: sub_matches.get_one::<String>("PARTNUMBER").unwrap().parse::<usize>().unwrap(),
                         image: match Url::parse(sub_matches.get_one::<String>("IMAGE").unwrap()) {
                             Ok(url) => Image::Url(url),
                             Err(_) => Image::Path(PathBuf::from(
@@ -222,30 +222,33 @@ fn setup_output<T: AsRawFd>(output: &T, bmap: &Bmap, metadata: std::fs::Metadata
 async fn copy(c: Copy) -> Result<()> {
     if c.nobmap {
         return match c.image {
-            Image::Path(path) => copy_local_input_nobmap(path, c.dest, -1),
-            Image::Url(url) => copy_remote_input_nobmap(url, c.dest, -1).await,
+            Image::Path(path) => copy_local_input_nobmap(path, c.dest),
+            Image::Url(url) => copy_remote_input_nobmap(url, c.dest).await,
         };
     }
     match c.image {
-        Image::Path(path) => copy_local_input(path, c.dest, -1),
-        Image::Url(url) => copy_remote_input(url, c.dest, -1).await,
+        Image::Path(path) => copy_local_input(path, c.dest),
+        Image::Url(url) => copy_remote_input(url, c.dest).await,
     }
 }
 
 async fn copypart(c: CopyPart) -> Result<()> {
+
+    /*
     if c.nobmap {
         return match c.image {
-            Image::Path(path) => copy_local_input_nobmap(path, c.dest, c.partnumber),
-            Image::Url(url) => copy_remote_input_nobmap(url, c.dest, c.partnumber).await,
+            Image::Path(path) => copy_local_part_nobmap(path, c.dest, c.partnumber),
+            Image::Url(url) => copy_remote_part_nobmap(url, c.dest, c.partnumber).await,
         };
     }
+    */
     match c.image {
-        Image::Path(path) => copy_local_input(path, c.dest, c.partnumber),
-        Image::Url(url) => copy_remote_input(url, c.dest, c.partnumber).await,
+        Image::Path(path) => copy_local_part(path, c.dest, c.partnumber),
+        Image::Url(url) => copy_remote_part(url, c.dest, c.partnumber).await,
     }
 }
 
-fn copy_local_input(source: PathBuf, destination: PathBuf, partnumber: i32) -> Result<()> {
+fn copy_local_input(source: PathBuf, destination: PathBuf) -> Result<()> {
     ensure!(source.exists(), "Image file doesn't exist");
     let bmap = find_bmap(&source).ok_or_else(|| anyhow!("Couldn't find bmap file"))?;
     println!("Found bmap file: {}", bmap.display());
@@ -264,11 +267,7 @@ fn copy_local_input(source: PathBuf, destination: PathBuf, partnumber: i32) -> R
 
     let mut input = setup_local_input(&source)?;
     let pb = setup_progress_bar(&bmap);
-    if partnumber <= 0 {
-        bmap_parser::copy(&mut input, &mut pb.wrap_write(&output), &bmap)?;
-    } else {
-        bmap_parser::copypart(partnumber, &mut input, &mut pb.wrap_write(&output), &bmap)?;
-    }
+    bmap_parser::copy(&mut input, &mut pb.wrap_write(&output), &bmap)?;
     pb.finish_and_clear();
 
     println!("Done: Syncing...");
@@ -277,7 +276,35 @@ fn copy_local_input(source: PathBuf, destination: PathBuf, partnumber: i32) -> R
     Ok(())
 }
 
-async fn copy_remote_input(source: Url, destination: PathBuf, partnumber: i32) -> Result<()> {
+fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> Result<()> {
+    ensure!(source.exists(), "Image file doesn't exist");
+    let bmap = find_bmap(&source).ok_or_else(|| anyhow!("Couldn't find bmap file"))?;
+    println!("Found bmap file: {}", bmap.display());
+
+    let mut b = File::open(&bmap).context("Failed to open bmap file")?;
+    let mut xml = String::new();
+    b.read_to_string(&mut xml)?;
+
+    let bmap = Bmap::from_xml(&xml)?;
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(destination)?;
+
+    setup_output(&output, &bmap, output.metadata()?)?;
+
+    let mut input = setup_local_input(&source)?;
+    let pb = setup_progress_bar(&bmap);
+    bmap_parser::copypart(partnumber, &mut input, &mut pb.wrap_write(&output), &bmap)?;
+    pb.finish_and_clear();
+
+    println!("Done: Syncing...");
+    output.sync_all()?;
+
+    Ok(())
+}
+
+async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
     let bmap_url = find_remote_bmap(source.clone())?;
 
     let xml = reqwest::get(bmap_url.clone()).await?.text().await?;
@@ -313,7 +340,43 @@ async fn copy_remote_input(source: Url, destination: PathBuf, partnumber: i32) -
     Ok(())
 }
 
-fn copy_local_input_nobmap(source: PathBuf, destination: PathBuf, partnumber: i32) -> Result<()> {
+async fn copy_remote_part(source: Url, destination: PathBuf, partnumber: usize) -> Result<()> {
+    let bmap_url = find_remote_bmap(source.clone())?;
+
+    let xml = reqwest::get(bmap_url.clone()).await?.text().await?;
+    println!("Found bmap file: {}", bmap_url);
+
+    let bmap = Bmap::from_xml(&xml)?;
+    let mut output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(destination)
+        .await?;
+
+    setup_output(&output, &bmap, output.metadata().await?)?;
+
+    let res = setup_remote_input(source).await?;
+    let stream = res
+        .bytes_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .into_async_read();
+    let reader = GzipDecoder::new(stream);
+    let mut input = AsyncDiscarder::new(reader);
+    let pb = setup_progress_bar(&bmap);
+    bmap_parser::copypart_async(
+        &mut input,
+        &mut pb.wrap_async_write(&mut output).compat(),
+        &bmap,
+    )
+    .await?;
+    pb.finish_and_clear();
+
+    println!("Done: Syncing...");
+    output.sync_all().await?;
+    Ok(())
+}
+
+fn copy_local_input_nobmap(source: PathBuf, destination: PathBuf) -> Result<()> {
     ensure!(source.exists(), "Image file doesn't exist");
 
     let output = std::fs::OpenOptions::new()
@@ -333,7 +396,7 @@ fn copy_local_input_nobmap(source: PathBuf, destination: PathBuf, partnumber: i3
     Ok(())
 }
 
-async fn copy_remote_input_nobmap(source: Url, destination: PathBuf, partnumber: i32) -> Result<()> {
+async fn copy_remote_input_nobmap(source: Url, destination: PathBuf) -> Result<()> {
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
