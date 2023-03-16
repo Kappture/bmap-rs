@@ -212,12 +212,18 @@ where
 pub fn copypart<I, O>(partnumber: usize, input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
 where
     I: Read + SeekForward,
-    O: Write + SeekForward,
+    O: Read + Write + SeekForward,
 {
 
-    let parts = get_partitions(input);
+    println!("Source partitions:");
     println!("{:#?}", parts);
-    println!("wa");
+
+    let parts2 = get_partitions(unwrap());
+    println!("Dest partitions:");
+    println!("{:#?}", parts);
+
+    println!("BMap:");
+    println!("{:#?}" ,map);
 
     if parts.len() < partnumber {
         println!("wawawa");
@@ -227,16 +233,18 @@ where
         return Err(CopyError::PartitionNumberError);
     }
 
-    Ok(())
-/*
+    let mut minBlock = 0;
+    let mut maxBlock = 0;
+
     let mut hasher = match map.checksum_type() {
         HashType::Sha256 => Sha256::new(),
     };
 
-    let mut v = Vec::new();
+    //let mut v = Vec::new();
     // TODO benchmark a reasonable size for this
-    v.resize(8 * 1024 * 1024, 0);
+    //v.resize(8 * 1024 * 1024, 0);
 
+    /*
     let buf = v.as_mut_slice();
     let mut position = 0;
     for range in map.block_map() {
@@ -268,9 +276,9 @@ where
 
         position = range.offset() + range.length();
     }
+    */
 
     Ok(())
-    */
 }
 
 pub async fn copypart_async<I, O>(input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>

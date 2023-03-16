@@ -286,7 +286,9 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
     b.read_to_string(&mut xml)?;
 
     let bmap = Bmap::from_xml(&xml)?;
+
     let output = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
         .open(destination)?;
