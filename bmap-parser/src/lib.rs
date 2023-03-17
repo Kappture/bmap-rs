@@ -215,12 +215,13 @@ where
     O: Read + Write + SeekForward,
 {
 
+    let parts = get_partitions(input);
     println!("Source partitions:");
     println!("{:#?}", parts);
 
-    let parts2 = get_partitions(unwrap());
+    let parts2 = get_partitions(output);
     println!("Dest partitions:");
-    println!("{:#?}", parts);
+    println!("{:#?}", parts2);
 
     println!("BMap:");
     println!("{:#?}" ,map);
