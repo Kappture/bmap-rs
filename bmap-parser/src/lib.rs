@@ -216,8 +216,15 @@ where
 {
 
     let parts = get_partitions(input);
+    println!("Source partitions:");
     println!("{:#?}", parts);
-    println!("wa");
+
+    let parts2 = get_partitions(output);
+    println!("Dest partitions:");
+    println!("{:#?}", parts2);
+
+    println!("BMap:");
+    println!("{:#?}" ,map);
 
     if parts.len() < partnumber {
         println!("wawawa");
