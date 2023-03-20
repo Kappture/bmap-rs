@@ -212,39 +212,11 @@ where
     return partitions;
 }
 
-pub fn copypart<I, O>(partnumber: usize, input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
+pub fn copy_between_offset<I, O>(input: &mut I, output: &mut O, map: &Bmap, lowBlock: u32, highBlock: u32, destOffset: u32) -> Result<(), CopyError>
 where
     I: Read + SeekForward,
-    O: Read + Write + SeekForward,
+    O: Write + SeekForward,
 {
-
-    let src_parts = get_partitions(input);
-    println!("Source partitions:");
-    println!("{:#?}", src_parts);
-
-    let dst_parts = get_partitions(output);
-    println!("Dest partitions:");
-    println!("{:#?}", dst_parts);
-
-    println!("BMap:");
-    println!("{:#?}", map);
-
-    let partnumber_i = partnumber as u32;
-
-    if (src_parts.len() < partnumber) || (dst_parts.len() < partnumber) {
-        println!("wawawa");
-        return Err(CopyError::PartitionDoesntExistError);
-    } else if partnumber == 0 {
-        println!("wawawa");
-        return Err(CopyError::PartitionNumberError);
-    } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dst_parts[&partnumber_i].last_lba - dst_parts[&partnumber_i].first_lba)  {
-        println!("wawawa");
-        return Err(CopyError::DestinationPartitionTooSmall);
-    }
-
-    let mut lowBlock = src_parts[&partnumber_i].first_lba;
-    let mut highBlock = src_parts[&partnumber_i].last_lba;
-    let mut destOffset = dst_parts[&partnumber_i].first_lba - src_parts[&partnumber_i].first_lba;
 
     let mut hasher = match map.checksum_type() {
         HashType::Sha256 => Sha256::new(),
@@ -265,6 +237,101 @@ where
             .map_err(CopyError::WriteError)?;
 
         let mut left = range.length() as usize;
+        while left > 0 {
+            let toread = left.min(buf.len());
+            let r = input
+                .read(&mut buf[0..toread])
+                .map_err(CopyError::ReadError)?;
+            if r == 0 {
+                return Err(CopyError::UnexpectedEof);
+            }
+            hasher.update(&buf[0..r]);
+            output
+                .write_all(&buf[0..r])
+                .map_err(CopyError::WriteError)?;
+            left -= r;
+        }
+        let digest = hasher.finalize_reset();
+        if range.checksum().as_slice() != digest.as_slice() {
+            return Err(CopyError::ChecksumError);
+        }
+
+        position = range.offset() + range.length();
+    }
+
+
+    Ok(())
+}
+
+pub fn copypart<I, O>(input: &mut I, output: &mut O, map: &Bmap, srcpart: &Partition, destpart: &Partition) -> Result<(), CopyError>
+where
+    I: Read + SeekForward,
+    O: Read + Write + SeekForward,
+{
+
+    if (srcpart.last_lba - srcpart.first_lba) > (destpart.last_lba - destpart.first_lba)  {
+        return Err(CopyError::DestinationPartitionTooSmall);
+    }
+
+    let low_byte = srcpart.first_lba * 4096;
+    let high_byte = srcpart.last_lba * 4096;
+    let byte_offset = (destpart.first_lba - srcpart.first_lba) * 4096;
+
+    let part_range = low_byte..high_byte;
+
+    println!("low byte: {:#?}", low_byte);
+    println!("high byte: {:#?}", high_byte);
+    println!("byte offset: {:#?}", byte_offset);
+
+    let mut hasher = match map.checksum_type() {
+        HashType::Sha256 => Sha256::new(),
+    };
+
+    let mut v = Vec::new();
+    // TODO benchmark a reasonable size for this
+    //v.resize(8 * 1024 * 1024, 0); // LBA per LBA
+    v.resize(4096, 0); // LBA per LBA
+
+
+    let buf = v.as_mut_slice();
+    let mut position = 0;
+    for range in map.block_map() {
+        let source_range = range.offset()..(range.offset() + range.length());
+
+        if (source_range.start < part_range.start) && (source_range.end < part_range.start) {
+            println!("Block out of range!! Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+            continue;
+        }
+
+        if source_range.start > part_range.end {
+            println!("Block out of range!! Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+            continue;
+        }
+
+        if (source_range.start >= part_range.start) && (source_range.end <= part_range.end) {
+            println!("Block fully inside destination partition. Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+        }
+
+        let mut forward = range.offset() - position;
+        let mut left_delta = 0;
+        if part_range.start > source_range.start {
+            println!("Range start earlier than partition. Shifting copy start to +{:#?} ({:#?}). Start: {:#?} End: {:#?}", part_range.start - source_range.start, part_range.start, range.offset(), range.offset() + range.length());
+            forward = part_range.start - position;
+            left_delta += part_range.start - source_range.start;
+        }
+
+        if part_range.end < source_range.end {
+            println!("Range finish later than partition. Shifting copy end to -{:#?} ({:#?}). Start: {:#?} End: {:#?}", source_range.end - part_range.end, part_range.end, range.offset(), range.offset() + range.length());
+            left_delta += source_range.end - part_range.end;
+        }
+
+        let mut left = (range.length() - left_delta) as usize;
+
+        input.seek_forward(forward).map_err(CopyError::ReadError)?;
+        output
+            .seek_forward(forward + byte_offset)
+            .map_err(CopyError::WriteError)?;
+
         while left > 0 {
             let toread = left.min(buf.len());
             let r = input

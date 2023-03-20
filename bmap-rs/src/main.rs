@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use async_compression::futures::bufread::GzipDecoder;
-use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward};
+use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
@@ -14,6 +14,12 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tokio_util::compat::TokioAsyncReadCompatExt;
+
+use std::io::Cursor;
+
+use gpt::{header, disk, partition};
+use gpt::partition::Partition;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 enum Image {
@@ -100,12 +106,9 @@ impl Opts {
                 command: Subcommand::CopyPart({
                     CopyPart {
                         partnumber: sub_matches.get_one::<String>("PARTNUMBER").unwrap().parse::<usize>().unwrap(),
-                        image: match Url::parse(sub_matches.get_one::<String>("IMAGE").unwrap()) {
-                            Ok(url) => Image::Url(url),
-                            Err(_) => Image::Path(PathBuf::from(
+                        image: Image::Path(PathBuf::from(
                                 sub_matches.get_one::<String>("IMAGE").unwrap(),
                             )),
-                        },
                         dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
                         nobmap: sub_matches.get_flag("nobmap"),
                     }
@@ -145,6 +148,34 @@ fn find_remote_bmap(mut url: Url) -> Result<Url> {
     path.set_extension("bmap");
     url.set_path(path.to_str().unwrap());
     Ok(url)
+}
+
+fn get_partitions(input: &mut Decoder) -> BTreeMap<u32, Partition>
+{
+    let mut v = Vec::new();
+
+    v.resize(4096 * 10, 0); // a LBA is 4096 bytes, partition table is usually at LBA 3, let's load 10 LBAs to be safe
+    let mut buf = v.as_mut_slice();
+
+    let r = input
+                .read(&mut buf)
+                .map_err(CopyError::ReadError);//?;
+
+    /*
+    if r == 0 {
+        return Err(CopyError::UnexpectedEof);
+    }
+    */
+
+    let mut c = Cursor::new(buf);
+
+    let lb_size = disk::DEFAULT_SECTOR_SIZE;
+
+    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
+
+    let partitions = partition::file_read_partitions(&mut c, &hdr, lb_size).unwrap();//;.map_err(CopyError::GPTReadError);
+
+    return partitions;
 }
 
 trait ReadSeekForward: SeekForward + Read {}
@@ -242,9 +273,10 @@ async fn copypart(c: CopyPart) -> Result<()> {
         };
     }
     */
+
     match c.image {
         Image::Path(path) => copy_local_part(path, c.dest, c.partnumber),
-        Image::Url(url) => copy_remote_part(url, c.dest, c.partnumber).await,
+        Image::Url(url) => copy_remote_part(url, c.dest, c.partnumber).await
     }
 }
 
@@ -287,8 +319,38 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
 
     let bmap = Bmap::from_xml(&xml)?;
 
+    let mut src_input = setup_local_input(&source)?;
+    let src_parts = get_partitions(&mut src_input);
+    let mut dest_input = setup_local_input(&destination)?;
+    let dest_parts = get_partitions(&mut dest_input);
+
+    /*
+    println!("Src partitions");
+    println!("{:#?}", src_parts);
+
+    println!("Dest partitions:");
+    println!("{:#?}", dest_parts);
+
+    println!("BMAP");
+    println!("{:#?}", bmap);
+    */
+
+    let partnumber_i = partnumber as u32;
+
+     /*
+    if (src_parts.len() < partnumber) || (dst_parts.len() < partnumber) {
+        println!("wawawa");
+        return Err(CopyError::PartitionDoesntExistError);
+    } else if partnumber == 0 {
+        println!("wawawa");
+        return Err(CopyError::PartitionNumberError);
+    } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dst_parts[&partnumber_i].last_lba - dst_parts[&partnumber_i].first_lba)  {
+        println!("wawawa");
+        return Err(CopyError::DestinationPartitionTooSmall);
+    }
+    */
+
     let output = std::fs::OpenOptions::new()
-        .read(true)
         .write(true)
         .create(true)
         .open(destination)?;
@@ -297,7 +359,9 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
 
     let mut input = setup_local_input(&source)?;
     let pb = setup_progress_bar(&bmap);
-    bmap_parser::copypart(partnumber, &mut input, &mut pb.wrap_write(&output), &bmap)?;
+    let srcpart = src_parts.get(&partnumber_i).unwrap();
+    let destpart = dest_parts.get(&partnumber_i).unwrap();
+    bmap_parser::copypart(&mut input, &mut pb.wrap_write(&output), &bmap, &srcpart, &destpart)?;
     pb.finish_and_clear();
 
     println!("Done: Syncing...");

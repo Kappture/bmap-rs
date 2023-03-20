@@ -22,3 +22,4 @@ tokio = { version = "1.21.2", features = ["rt", "macros", "fs", "rt-multi-thread
 reqwest = { version = "0.11.12", features = ["stream"] }
 tokio-util = { version = "0.7.4", features = ["compat"] }
 futures = "0.3.25"
+gpt = "3.0.0"
