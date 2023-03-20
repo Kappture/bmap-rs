@@ -57,6 +57,8 @@ pub enum CopyError {
     PartitionNumberError,
     #[error("GPT partition number does not exist")]
     PartitionDoesntExistError,
+    #[error("Destination partition is smaller than source partition")]
+    DestinationPartitionTooSmall,
 }
 
 pub fn copy<I, O>(input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
@@ -192,6 +194,7 @@ where
     let r = input
                 .read(&mut buf)
                 .map_err(CopyError::ReadError);//?;
+
     /*
     if r == 0 {
         return Err(CopyError::UnexpectedEof);
@@ -215,37 +218,43 @@ where
     O: Read + Write + SeekForward,
 {
 
-    let parts = get_partitions(input);
+    let src_parts = get_partitions(input);
     println!("Source partitions:");
-    println!("{:#?}", parts);
+    println!("{:#?}", src_parts);
 
-    let parts2 = get_partitions(output);
+    let dst_parts = get_partitions(output);
     println!("Dest partitions:");
-    println!("{:#?}", parts2);
+    println!("{:#?}", dst_parts);
 
     println!("BMap:");
-    println!("{:#?}" ,map);
+    println!("{:#?}", map);
 
-    if parts.len() < partnumber {
+    let partnumber_i = partnumber as u32;
+
+    if (src_parts.len() < partnumber) || (dst_parts.len() < partnumber) {
         println!("wawawa");
         return Err(CopyError::PartitionDoesntExistError);
     } else if partnumber == 0 {
         println!("wawawa");
         return Err(CopyError::PartitionNumberError);
+    } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dst_parts[&partnumber_i].last_lba - dst_parts[&partnumber_i].first_lba)  {
+        println!("wawawa");
+        return Err(CopyError::DestinationPartitionTooSmall);
     }
 
-    let mut minBlock = 0;
-    let mut maxBlock = 0;
+    let mut lowBlock = src_parts[&partnumber_i].first_lba;
+    let mut highBlock = src_parts[&partnumber_i].last_lba;
+    let mut destOffset = dst_parts[&partnumber_i].first_lba - src_parts[&partnumber_i].first_lba;
 
     let mut hasher = match map.checksum_type() {
         HashType::Sha256 => Sha256::new(),
     };
 
-    //let mut v = Vec::new();
+    let mut v = Vec::new();
     // TODO benchmark a reasonable size for this
-    //v.resize(8 * 1024 * 1024, 0);
+    v.resize(8 * 1024 * 1024, 0);
 
-    /*
+
     let buf = v.as_mut_slice();
     let mut position = 0;
     for range in map.block_map() {
@@ -277,7 +286,7 @@ where
 
         position = range.offset() + range.length();
     }
-    */
+
 
     Ok(())
 }
