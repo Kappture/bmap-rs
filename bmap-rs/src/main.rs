@@ -3,7 +3,7 @@ use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use flate2::read::GzDecoder;
-use xz::read::XzDecoder;
+use xz2::read::XzDecoder;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
