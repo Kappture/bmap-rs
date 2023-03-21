@@ -172,6 +172,7 @@ fn get_partitions(input: &mut Decoder) -> BTreeMap<u32, Partition>
     let lb_size = disk::DEFAULT_SECTOR_SIZE;
 
     let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
+    //println!("{:#?}", hdr);
 
     let partitions = partition::file_read_partitions(&mut c, &hdr, lb_size).unwrap();//;.map_err(CopyError::GPTReadError);
 
@@ -321,8 +322,10 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
 
     let mut src_input = setup_local_input(&source)?;
     let src_parts = get_partitions(&mut src_input);
+    drop(src_input);
     let mut dest_input = setup_local_input(&destination)?;
     let dest_parts = get_partitions(&mut dest_input);
+    drop(dest_input);
 
     /*
     println!("Src partitions");

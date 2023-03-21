@@ -182,87 +182,6 @@ where
     Ok(())
 }
 
-pub fn get_partitions<I>(input: &mut I) -> BTreeMap<u32, Partition> //Result<BTreeMap<u32, Partition>, CopyError>
-where
-    I: Read,
-{
-    let mut v = Vec::new();
-
-    v.resize(8 * 1024 * 1024, 0);
-    let mut buf = v.as_mut_slice();
-
-    let r = input
-                .read(&mut buf)
-                .map_err(CopyError::ReadError);//?;
-
-    /*
-    if r == 0 {
-        return Err(CopyError::UnexpectedEof);
-    }
-    */
-
-    let mut c = Cursor::new(buf);
-
-    let lb_size = disk::DEFAULT_SECTOR_SIZE;
-
-    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
-
-    let partitions = partition::file_read_partitions(&mut c, &hdr, lb_size).unwrap();//;.map_err(CopyError::GPTReadError);
-
-    return partitions;
-}
-
-pub fn copy_between_offset<I, O>(input: &mut I, output: &mut O, map: &Bmap, lowBlock: u32, highBlock: u32, destOffset: u32) -> Result<(), CopyError>
-where
-    I: Read + SeekForward,
-    O: Write + SeekForward,
-{
-
-    let mut hasher = match map.checksum_type() {
-        HashType::Sha256 => Sha256::new(),
-    };
-
-    let mut v = Vec::new();
-    // TODO benchmark a reasonable size for this
-    v.resize(8 * 1024 * 1024, 0);
-
-
-    let buf = v.as_mut_slice();
-    let mut position = 0;
-    for range in map.block_map() {
-        let forward = range.offset() - position;
-        input.seek_forward(forward).map_err(CopyError::ReadError)?;
-        output
-            .seek_forward(forward)
-            .map_err(CopyError::WriteError)?;
-
-        let mut left = range.length() as usize;
-        while left > 0 {
-            let toread = left.min(buf.len());
-            let r = input
-                .read(&mut buf[0..toread])
-                .map_err(CopyError::ReadError)?;
-            if r == 0 {
-                return Err(CopyError::UnexpectedEof);
-            }
-            hasher.update(&buf[0..r]);
-            output
-                .write_all(&buf[0..r])
-                .map_err(CopyError::WriteError)?;
-            left -= r;
-        }
-        let digest = hasher.finalize_reset();
-        if range.checksum().as_slice() != digest.as_slice() {
-            return Err(CopyError::ChecksumError);
-        }
-
-        position = range.offset() + range.length();
-    }
-
-
-    Ok(())
-}
-
 pub fn copypart<I, O>(input: &mut I, output: &mut O, map: &Bmap, srcpart: &Partition, destpart: &Partition) -> Result<(), CopyError>
 where
     I: Read + SeekForward,
@@ -273,15 +192,20 @@ where
         return Err(CopyError::DestinationPartitionTooSmall);
     }
 
-    let low_byte = srcpart.first_lba * 4096;
-    let high_byte = srcpart.last_lba * 4096;
-    let byte_offset = (destpart.first_lba - srcpart.first_lba) * 4096;
+    let sector_size = u64::from(gpt::disk::DEFAULT_SECTOR_SIZE);
+
+    let low_byte = (srcpart.first_lba) * sector_size;
+    let high_byte = (srcpart.last_lba) * sector_size;
+    let byte_offset = (destpart.first_lba - srcpart.first_lba) * sector_size;
 
     let part_range = low_byte..high_byte;
 
-    println!("low byte: {:#?}", low_byte);
-    println!("high byte: {:#?}", high_byte);
+    /*
+    println!("low byte: {:#?}", part_range.start);
+    println!("high byte: {:#?}", part_range.end);
     println!("byte offset: {:#?}", byte_offset);
+    println!("sector size: {:#?}", sector_size);
+    */
 
     let mut hasher = match map.checksum_type() {
         HashType::Sha256 => Sha256::new(),
@@ -289,8 +213,7 @@ where
 
     let mut v = Vec::new();
     // TODO benchmark a reasonable size for this
-    //v.resize(8 * 1024 * 1024, 0); // LBA per LBA
-    v.resize(4096, 0); // LBA per LBA
+    v.resize(8 * 1024 * 1024, 0);
 
 
     let buf = v.as_mut_slice();
@@ -299,17 +222,18 @@ where
         let source_range = range.offset()..(range.offset() + range.length());
 
         if (source_range.start < part_range.start) && (source_range.end < part_range.start) {
-            println!("Block out of range!! Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+            //println!("Block out of range!! Start: {:#?} End: {:#?}", source_range.start, source_range.end);
             continue;
         }
 
         if source_range.start > part_range.end {
-            println!("Block out of range!! Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+            //println!("Block out of range!! Start: {:#?} End: {:#?}", source_range.start, source_range.end);
             continue;
         }
 
+
         if (source_range.start >= part_range.start) && (source_range.end <= part_range.end) {
-            println!("Block fully inside destination partition. Start: {:#?} End: {:#?}", range.offset(), range.offset() + range.length());
+            //println!("Block fully inside destination partition. Start: {:#?} End: {:#?}", source_range.start, source_range.end);
         }
 
         let mut forward = range.offset() - position;
@@ -353,7 +277,6 @@ where
 
         position = range.offset() + range.length();
     }
-
 
     Ok(())
 }
