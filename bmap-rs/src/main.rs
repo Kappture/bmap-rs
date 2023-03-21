@@ -3,6 +3,7 @@ use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use flate2::read::GzDecoder;
+use xz::read::XzDecoder;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
@@ -212,7 +213,11 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
         Some("gz") => {
             let gz = GzDecoder::new(f);
             Ok(Decoder::new(Discarder::new(gz)))
-        }
+        },
+        Some("xz") => {
+            let xz = XzDecoder::new(f);
+            Ok(Decoder::new(Discarder::new(xz)))
+        },
         _ => Ok(Decoder::new(f)),
     }
 }
