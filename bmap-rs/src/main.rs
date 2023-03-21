@@ -340,18 +340,14 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
 
     let partnumber_i = partnumber as u32;
 
-     /*
-    if (src_parts.len() < partnumber) || (dst_parts.len() < partnumber) {
-        println!("wawawa");
-        return Err(CopyError::PartitionDoesntExistError);
+
+    if (src_parts.len() < partnumber) || (dest_parts.len() < partnumber) {
+        return Err(CopyError::PartitionDoesntExistError)?;
     } else if partnumber == 0 {
-        println!("wawawa");
-        return Err(CopyError::PartitionNumberError);
-    } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dst_parts[&partnumber_i].last_lba - dst_parts[&partnumber_i].first_lba)  {
-        println!("wawawa");
-        return Err(CopyError::DestinationPartitionTooSmall);
+        return Err(CopyError::PartitionNumberError)?;
+    } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dest_parts[&partnumber_i].last_lba - dest_parts[&partnumber_i].first_lba)  {
+        return Err(CopyError::DestinationPartitionTooSmall)?;
     }
-    */
 
     let output = std::fs::OpenOptions::new()
         .write(true)
