@@ -1,10 +1,8 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use futures::TryStreamExt;
 use nix::unistd::ftruncate;
-use reqwest::{Response, Url};
 use std::ffi::OsStr;
 use std::fmt::Write;
 use std::fs::File;
@@ -19,6 +17,12 @@ use std::io::Cursor;
 use gpt::{header, disk, partition};
 use gpt::partition::Partition;
 use std::collections::BTreeMap;
+
+#[cfg(feature = "remote")]
+use reqwest::{Response, Url};
+
+#[cfg(feature = "remote")]
+use async_compression::futures::bufread::GzipDecoder;
 
 #[cfg(feature = "progress")]
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
@@ -46,6 +50,7 @@ pub enum FeatureError {
 #[derive(Debug)]
 enum Image {
     Path(PathBuf),
+    #[cfg(feature = "remote")]
     Url(Url),
 }
 
@@ -112,15 +117,28 @@ impl Opts {
         match matches.subcommand() {
             Some(("copy", sub_matches)) => Opts {
                 command: Subcommand::Copy({
-                    Copy {
-                        image: match Url::parse(sub_matches.get_one::<String>("IMAGE").unwrap()) {
-                            Ok(url) => Image::Url(url),
-                            Err(_) => Image::Path(PathBuf::from(
+                    #[cfg(feature = "remote")]
+                    {
+                        Copy {
+                            image: match Url::parse(sub_matches.get_one::<String>("IMAGE").unwrap()) {
+                                Ok(url) => Image::Url(url),
+                                Err(_) => Image::Path(PathBuf::from(
+                                    sub_matches.get_one::<String>("IMAGE").unwrap(),
+                                )),
+                            },
+                            dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
+                            nobmap: sub_matches.get_flag("nobmap"),
+                        }
+                    }
+                    #[cfg(not(feature = "remote"))]
+                    {
+                        Copy {
+                            image: Image::Path(PathBuf::from(
                                 sub_matches.get_one::<String>("IMAGE").unwrap(),
                             )),
-                        },
-                        dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
-                        nobmap: sub_matches.get_flag("nobmap"),
+                            dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
+                            nobmap: sub_matches.get_flag("nobmap"),
+                        }
                     }
                 }),
             },
@@ -165,6 +183,7 @@ fn find_bmap(img: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(feature = "remote")]
 fn find_remote_bmap(mut url: Url) -> Result<Url> {
     let mut path = PathBuf::from(url.path());
     path.set_extension("bmap");
@@ -271,6 +290,7 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
     }
 }
 
+#[cfg(feature = "remote")]
 async fn setup_remote_input(url: Url) -> Result<Response> {
     match PathBuf::from(url.path())
         .extension()
@@ -311,11 +331,13 @@ async fn copy(c: Copy) -> Result<()> {
     if c.nobmap {
         return match c.image {
             Image::Path(path) => copy_local_input_nobmap(path, c.dest),
+            #[cfg(feature = "remote")]
             Image::Url(url) => copy_remote_input_nobmap(url, c.dest).await,
         };
     }
     match c.image {
         Image::Path(path) => copy_local_input(path, c.dest),
+        #[cfg(feature = "remote")]
         Image::Url(url) => copy_remote_input(url, c.dest).await,
     }
 }
@@ -333,6 +355,7 @@ async fn copypart(c: CopyPart) -> Result<()> {
 
     match c.image {
         Image::Path(path) => copy_local_part(path, c.dest, c.partnumber),
+        #[cfg(feature = "remote")]
         Image::Url(url) => copy_remote_part(url, c.dest, c.partnumber).await
     }
 }
@@ -443,6 +466,7 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
     Ok(())
 }
 
+#[cfg(feature = "remote")]
 async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
     let bmap_url = find_remote_bmap(source.clone())?;
 
@@ -497,6 +521,7 @@ async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "remote")]
 async fn copy_remote_part(source: Url, destination: PathBuf, partnumber: usize) -> Result<()> {
     let bmap_url = find_remote_bmap(source.clone())?;
 
@@ -580,6 +605,7 @@ fn copy_local_input_nobmap(source: PathBuf, destination: PathBuf) -> Result<()> 
     Ok(())
 }
 
+#[cfg(feature = "remote")]
 async fn copy_remote_input_nobmap(source: Url, destination: PathBuf) -> Result<()> {
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
