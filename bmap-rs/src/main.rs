@@ -12,6 +12,7 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tokio_util::compat::TokioAsyncReadCompatExt;
+use thiserror::Error;
 
 use std::io::Cursor;
 
@@ -30,6 +31,17 @@ use flate2::read::GzDecoder;
 
 #[cfg(feature = "xz")]
 use xz2::read::XzDecoder;
+
+#[derive(Debug, Error)]
+pub enum FeatureError {
+    #[error("XZ is not supported by this build")]
+    XZNotSupported,
+    #[error("LZ4 is not supported by this build")]
+    LZ4NotSupported,
+    #[error("GZ is not supported by this build")]
+    GZNotSupported,
+
+}
 
 #[derive(Debug)]
 enum Image {
@@ -228,7 +240,7 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
 
             #[cfg(not(feature = "gz"))]
             {
-                  Ok(Decoder::new(f))
+                Err(FeatureError::GZNotSupported)?
             }
         },
         Some("xz") => {
@@ -252,7 +264,7 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
 
             #[cfg(not(feature = "lz4"))]
             {
-                Ok(Decoder::new(f))
+                Err(FeatureError::LZ4NotSupported)?
             }
         },
         _ => Ok(Decoder::new(f)),

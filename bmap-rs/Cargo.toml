@@ -27,6 +27,7 @@ progress = ["dep:indicatif"]
 
 [dependencies]
 bmap-parser = { path = "../bmap-parser", version = "0.1.0"}
+thiserror = "1.0.24"
 anyhow = "1.0.66"
 nix = "0.26.1"
 flate2 = { version = "1.0.24", optional = true }
