@@ -2,9 +2,8 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
-use flate2::read::GzDecoder;
+
 use xz2::read::XzDecoder;
-use lz4::Decoder as Lz4Decoder;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
@@ -22,6 +21,12 @@ use std::io::Cursor;
 use gpt::{header, disk, partition};
 use gpt::partition::Partition;
 use std::collections::BTreeMap;
+
+#[cfg(feature = "lz4")]
+use lz4::Decoder as Lz4Decoder;
+
+#[cfg(feature = "gz")]
+use flate2::read::GzDecoder;
 
 #[derive(Debug)]
 enum Image {
@@ -212,16 +217,32 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
     let f = File::open(path)?;
     match path.extension().and_then(OsStr::to_str) {
         Some("gz") => {
+            #[cfg(feature = "gz")]
+            {
             let gz = GzDecoder::new(f);
-            Ok(Decoder::new(Discarder::new(gz)))
+                Ok(Decoder::new(Discarder::new(gz)))
+            }
+
+            #[cfg(not(feature = "gz"))]
+            {
+                  Ok(Decoder::new(f))
+            }
         },
         Some("xz") => {
             let xz = XzDecoder::new(f);
             Ok(Decoder::new(Discarder::new(xz)))
         },
         Some("lz4") => {
-            let lz4 = Lz4Decoder::new(f).unwrap();
-            Ok(Decoder::new(Discarder::new(lz4)))
+            #[cfg(feature = "lz4")]
+            {
+                let lz4 = Lz4Decoder::new(f).unwrap();
+                Ok(Decoder::new(Discarder::new(lz4)))
+            }
+
+            #[cfg(not(feature = "lz4"))]
+            {
+                Ok(Decoder::new(f))
+            }
         },
         _ => Ok(Decoder::new(f)),
     }
