@@ -3,7 +3,6 @@ use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use futures::TryStreamExt;
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
 use reqwest::{Response, Url};
 use std::ffi::OsStr;
@@ -19,6 +18,9 @@ use std::io::Cursor;
 use gpt::{header, disk, partition};
 use gpt::partition::Partition;
 use std::collections::BTreeMap;
+
+#[cfg(feature = "progress")]
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 
 #[cfg(feature = "lz4")]
 use lz4::Decoder as Lz4Decoder;
@@ -268,6 +270,7 @@ async fn setup_remote_input(url: Url) -> Result<Response> {
     }
 }
 
+#[cfg(feature = "progress")]
 fn setup_progress_bar(bmap: &Bmap) -> ProgressBar {
     let pb = ProgressBar::new(bmap.total_mapped_size());
     pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -277,6 +280,7 @@ fn setup_progress_bar(bmap: &Bmap) -> ProgressBar {
     pb
 }
 
+#[cfg(feature = "progress")]
 fn setup_spinner() -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
@@ -331,7 +335,7 @@ fn copy_local_input(source: PathBuf, destination: PathBuf) -> Result<()> {
     b.read_to_string(&mut xml)?;
 
     let bmap = Bmap::from_xml(&xml)?;
-    let output = std::fs::OpenOptions::new()
+    let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .open(destination)?;
@@ -339,9 +343,18 @@ fn copy_local_input(source: PathBuf, destination: PathBuf) -> Result<()> {
     setup_output(&output, &bmap, output.metadata()?)?;
 
     let mut input = setup_local_input(&source)?;
-    let pb = setup_progress_bar(&bmap);
-    bmap_parser::copy(&mut input, &mut pb.wrap_write(&output), &bmap)?;
-    pb.finish_and_clear();
+
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_progress_bar(&bmap);
+        bmap_parser::copy(&mut input, &mut pb.wrap_write(&output), &bmap)?;
+        pb.finish_and_clear();
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copy(&mut input, &mut output, &bmap)?;
+    }
 
     println!("Done: Syncing...");
     output.sync_all()?;
@@ -397,11 +410,20 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
     setup_output(&output, &bmap, output.metadata()?)?;
 
     let mut input = setup_local_input(&source)?;
-    let pb = setup_progress_bar(&bmap);
     let srcpart = src_parts.get(&partnumber_i).unwrap();
     let destpart = dest_parts.get(&partnumber_i).unwrap();
-    bmap_parser::copypart(&mut input, &mut pb.wrap_write(&output), &bmap, &srcpart, &destpart)?;
-    pb.finish_and_clear();
+
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_progress_bar(&bmap);
+        bmap_parser::copypart(&mut input, &mut pb.wrap_write(&output), &bmap, &srcpart, &destpart)?;
+        pb.finish_and_clear();
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copypart(&mut input, &mut &output, &bmap, &srcpart, &destpart)?;
+    }
 
     println!("Done: Syncing...");
     output.sync_all()?;
@@ -431,17 +453,35 @@ async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
         .into_async_read();
     let reader = GzipDecoder::new(stream);
     let mut input = AsyncDiscarder::new(reader);
-    let pb = setup_progress_bar(&bmap);
-    bmap_parser::copy_async(
-        &mut input,
-        &mut pb.wrap_async_write(&mut output).compat(),
-        &bmap,
-    )
-    .await?;
-    pb.finish_and_clear();
 
-    println!("Done: Syncing...");
-    output.sync_all().await?;
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_progress_bar(&bmap);
+        bmap_parser::copy_async(
+            &mut input,
+            &mut pb.wrap_async_write(&mut output).compat(),
+            &bmap,
+        )
+        .await?;
+        pb.finish_and_clear();
+
+        println!("Done: Syncing...");
+        output.sync_all().await?;
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copy_async(
+            &mut input,
+            &mut output.compat(),
+            &bmap,
+        )
+        .await?;
+
+        println!("Done: Syncing...");
+        //output.sync_all().await?; // TODO: does not work
+    }
+
     Ok(())
 }
 
@@ -467,33 +507,60 @@ async fn copy_remote_part(source: Url, destination: PathBuf, partnumber: usize) 
         .into_async_read();
     let reader = GzipDecoder::new(stream);
     let mut input = AsyncDiscarder::new(reader);
-    let pb = setup_progress_bar(&bmap);
-    bmap_parser::copypart_async(
-        &mut input,
-        &mut pb.wrap_async_write(&mut output).compat(),
-        &bmap,
-    )
-    .await?;
-    pb.finish_and_clear();
 
-    println!("Done: Syncing...");
-    output.sync_all().await?;
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_progress_bar(&bmap);
+        bmap_parser::copypart_async(
+            &mut input,
+            &mut pb.wrap_async_write(&mut output).compat(),
+            &bmap,
+        )
+        .await?;
+        pb.finish_and_clear();
+
+        println!("Done: Syncing...");
+        output.sync_all().await?;
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copypart_async(
+            &mut input,
+            &mut output.compat(),
+            &bmap,
+        )
+        .await?;
+
+        println!("Done: Syncing...");
+
+        //output.sync_all().await?; // TODO: does not work
+    }
+
     Ok(())
 }
 
 fn copy_local_input_nobmap(source: PathBuf, destination: PathBuf) -> Result<()> {
     ensure!(source.exists(), "Image file doesn't exist");
 
-    let output = std::fs::OpenOptions::new()
+    let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .open(destination)?;
 
     let mut input = setup_local_input(&source)?;
 
-    let pb = setup_spinner();
-    bmap_parser::copy_nobmap(&mut input, &mut pb.wrap_write(&output))?;
-    pb.finish_and_clear();
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_spinner();
+        bmap_parser::copy_nobmap(&mut input, &mut pb.wrap_write(&output))?;
+        pb.finish_and_clear();
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copy_nobmap(&mut input, &mut output)?;
+    }
 
     println!("Done: Syncing...");
     output.sync_all().expect("Sync failure");
@@ -515,13 +582,27 @@ async fn copy_remote_input_nobmap(source: Url, destination: PathBuf) -> Result<(
         .into_async_read();
     let reader = GzipDecoder::new(stream);
     let mut input = AsyncDiscarder::new(reader);
-    let pb = setup_spinner();
-    bmap_parser::copy_async_nobmap(&mut input, &mut pb.wrap_async_write(&mut output).compat())
-        .await?;
-    pb.finish_and_clear();
 
-    println!("Done: Syncing...");
-    output.sync_all().await?;
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_spinner();
+        bmap_parser::copy_async_nobmap(&mut input, &mut pb.wrap_async_write(&mut output).compat())
+            .await?;
+        pb.finish_and_clear();
+
+        println!("Done: Syncing...");
+        output.sync_all().await?;
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copy_async_nobmap(&mut input, &mut output.compat())
+            .await?;
+
+        println!("Done: Syncing...");
+        //output.sync_all().await?; // TODO: does not work
+    }
+
     Ok(())
 }
 
