@@ -22,13 +22,14 @@ debug = 0
 default = ["lz4"]
 gz = ["dep:flate2"]
 lz4 = ["dep:lz4"]
+xz = ["dep:xz2"]
 
 [dependencies]
 bmap-parser = { path = "../bmap-parser", version = "0.1.0"}
 anyhow = "1.0.66"
 nix = "0.26.1"
 flate2 = { version = "1.0.24", optional = true }
-xz2 = { version = "0.1" }
+xz2 = { version = "0.1", optional = true }
 lz4 = { version = "1.24.0", optional = true }
 clap = { version = "4.0.18", features = ["cargo"] }
 indicatif = { version = "0.17.1", features = ["tokio"] }
@@ -38,3 +39,4 @@ reqwest = { version = "0.11.12", features = ["stream"] }
 tokio-util = { version = "0.7.4", features = ["compat"] }
 futures = "0.3.25"
 gpt = "3.0.0"
+

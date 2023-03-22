@@ -2,8 +2,6 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use async_compression::futures::bufread::GzipDecoder;
 use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
-
-use xz2::read::XzDecoder;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
@@ -27,6 +25,9 @@ use lz4::Decoder as Lz4Decoder;
 
 #[cfg(feature = "gz")]
 use flate2::read::GzDecoder;
+
+#[cfg(feature = "xz")]
+use xz2::read::XzDecoder;
 
 #[derive(Debug)]
 enum Image {
@@ -229,8 +230,16 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
             }
         },
         Some("xz") => {
-            let xz = XzDecoder::new(f);
-            Ok(Decoder::new(Discarder::new(xz)))
+            #[cfg(feature = "xz")]
+            {
+                let xz = XzDecoder::new(f);
+                Ok(Decoder::new(Discarder::new(xz)))
+            }
+
+            #[cfg(not(feature = "xz"))]
+            {
+                Ok(Decoder::new(f))
+            }
         },
         Some("lz4") => {
             #[cfg(feature = "lz4")]
