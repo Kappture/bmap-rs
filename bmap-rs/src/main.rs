@@ -4,6 +4,7 @@ use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
 use flate2::read::GzDecoder;
 use xz2::read::XzDecoder;
+use lz4::Decoder as Lz4Decoder;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use nix::unistd::ftruncate;
@@ -217,6 +218,10 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
         Some("xz") => {
             let xz = XzDecoder::new(f);
             Ok(Decoder::new(Discarder::new(xz)))
+        },
+        Some("lz4") => {
+            let lz4 = Lz4Decoder::new(f).unwrap();
+            Ok(Decoder::new(Discarder::new(lz4)))
         },
         _ => Ok(Decoder::new(f)),
     }
