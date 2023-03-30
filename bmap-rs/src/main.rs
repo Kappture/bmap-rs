@@ -36,6 +36,9 @@ use flate2::read::GzDecoder;
 #[cfg(feature = "xz")]
 use xz2::read::XzDecoder;
 
+#[cfg(feature = "tar")]
+use tar::Archive;
+
 #[derive(Debug, Error)]
 pub enum FeatureError {
     #[error("XZ is not supported by this build")]
@@ -44,7 +47,10 @@ pub enum FeatureError {
     LZ4NotSupported,
     #[error("GZ is not supported by this build")]
     GZNotSupported,
-
+    #[error("Tar is not supported by this build")]
+    TarNotSupported,
+    #[error("Tar detected but no --tar-inner-image given")]
+    TarButNoTarInnerImageArg,
 }
 
 #[derive(Debug)]
@@ -66,6 +72,7 @@ struct CopyPart {
     partnumber: usize,
     image: Image,
     dest: PathBuf,
+    tar_inner_image: PathBuf,
     nobmap: bool,
 }
 
@@ -109,7 +116,13 @@ impl Opts {
                         Arg::new("nobmap")
                             .short('n')
                             .long("nobmap")
-                            .action(ArgAction::SetTrue),
+                            .action(ArgAction::SetTrue)
+                     )
+                    .arg(
+                        Arg::new("tar-inner-image")
+                           .short('i')
+                           .long("tar-inner-image")
+                           .default_value("")
                     ),
 
             )
@@ -150,6 +163,7 @@ impl Opts {
                                 sub_matches.get_one::<String>("IMAGE").unwrap(),
                             )),
                         dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
+                        tar_inner_image: PathBuf::from(sub_matches.get_one::<String>("tar-inner-image").unwrap()),
                         nobmap: sub_matches.get_flag("nobmap"),
                     }
                 }),
@@ -249,11 +263,16 @@ impl SeekForward for Decoder {
 
 fn setup_local_input(path: &Path) -> Result<Decoder> {
     let f = File::open(path)?;
+    setup_decoder(f, path)
+}
+
+fn setup_decoder(file: File, path: &Path) -> Result<Decoder>
+{
     match path.extension().and_then(OsStr::to_str) {
         Some("gz") => {
             #[cfg(feature = "gz")]
             {
-            let gz = GzDecoder::new(f);
+                let gz = GzDecoder::new(file);
                 Ok(Decoder::new(Discarder::new(gz)))
             }
 
@@ -265,19 +284,19 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
         Some("xz") => {
             #[cfg(feature = "xz")]
             {
-                let xz = XzDecoder::new(f);
+                let xz = XzDecoder::new(file);
                 Ok(Decoder::new(Discarder::new(xz)))
             }
 
             #[cfg(not(feature = "xz"))]
             {
-                Ok(Decoder::new(f))
+                Ok(Decoder::new(file))
             }
         },
         Some("lz4") => {
             #[cfg(feature = "lz4")]
             {
-                let lz4 = Lz4Decoder::new(f).unwrap();
+                let lz4 = Lz4Decoder::new(file).unwrap();
                 Ok(Decoder::new(Discarder::new(lz4)))
             }
 
@@ -286,7 +305,7 @@ fn setup_local_input(path: &Path) -> Result<Decoder> {
                 Err(FeatureError::LZ4NotSupported)?
             }
         },
-        _ => Ok(Decoder::new(f)),
+        _ => Ok(Decoder::new(file)),
     }
 }
 
@@ -343,7 +362,6 @@ async fn copy(c: Copy) -> Result<()> {
 }
 
 async fn copypart(c: CopyPart) -> Result<()> {
-
     /*
     if c.nobmap {
         return match c.image {
@@ -354,10 +372,25 @@ async fn copypart(c: CopyPart) -> Result<()> {
     */
 
     match c.image {
-        Image::Path(path) => copy_local_part(path, c.dest, c.partnumber),
+        Image::Path(path) => {
+            match path.extension().and_then(OsStr::to_str) {
+                Some("tar") => {
+                    #[cfg(feature = "tar")]
+                    {
+                        copy_local_part_from_tar(path, c.tar_inner_image, c.dest, c.partnumber)
+                    }
+                    #[cfg(not(feature = "tar"))]
+                    {
+                        Err(FeatureError::TarNotSupported)?
+                    }
+                },
+                _ => copy_local_part(path, c.dest, c.partnumber)
+            }
+        },
         #[cfg(feature = "remote")]
         Image::Url(url) => copy_remote_part(url, c.dest, c.partnumber).await
     }
+
 }
 
 fn copy_local_input(source: PathBuf, destination: PathBuf) -> Result<()> {
@@ -415,17 +448,6 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
     let dest_parts = get_partitions(&mut dest_input);
     drop(dest_input);
 
-    /*
-    println!("Src partitions");
-    println!("{:#?}", src_parts);
-
-    println!("Dest partitions:");
-    println!("{:#?}", dest_parts);
-
-    println!("BMAP");
-    println!("{:#?}", bmap);
-    */
-
     let partnumber_i = partnumber as u32;
 
 
@@ -465,6 +487,114 @@ fn copy_local_part(source: PathBuf, destination: PathBuf, partnumber: usize) -> 
 
     Ok(())
 }
+
+#[cfg(feature = "tar")]
+fn copy_local_part_from_tar(source_tar: PathBuf, source: PathBuf, destination: PathBuf, partnumber: usize) -> Result<()> {
+
+    ensure!(source_tar.exists(), "Tar file doesn't exist");
+
+    // look for fixed bmap name for the moment
+    let mut bmap_candidate_1 = source.to_path_buf();
+    bmap_candidate_1.set_extension("bmap");
+    println!("candidate 1 {:?}", bmap_candidate_1);
+
+    // look for bmap
+    let bmaparchivefile = File::open(source_tar.clone()).unwrap();
+    let mut a = Archive::new(bmaparchivefile);
+    let mut xml = String::new();
+    for file in a.entries().unwrap() {
+        // Make sure there wasn't an I/O error
+        let mut file = file.unwrap();
+
+        if file.header().path().unwrap() == bmap_candidate_1 {
+            println!("Found bmap file in tar: {}", bmap_candidate_1.display());
+            file.read_to_string(&mut xml)?;
+            break;
+        }
+
+    }
+    let bmap = Bmap::from_xml(&xml)?;
+
+    // look for image
+    let source_tar_const: PathBuf = source_tar.clone();
+    let imgarchivefile: std::fs::File = File::open(source_tar_const).unwrap();
+    let ar = Box::leak(Box::new(Archive::new(imgarchivefile)));
+
+    for file in ar.entries().unwrap() {
+        // Make sure there wasn't an I/O error
+        let file = file.unwrap();
+
+        if file.header().path().unwrap() == source {
+            println!("Found image file in tar");
+
+            //let mut src_input = setup_decoder(file., &source);
+            let lz4 = Lz4Decoder::new(file).unwrap();
+            let mut dec = Decoder::new(Discarder::new(lz4));
+            let src_parts = get_partitions(&mut dec);
+
+            let mut dest_input = setup_local_input(&destination)?;
+            let dest_parts = get_partitions(&mut dest_input);
+            drop(dest_input);
+
+            let partnumber_i = partnumber as u32;
+
+
+            if (src_parts.len() < partnumber) || (dest_parts.len() < partnumber) {
+                return Err(CopyError::PartitionDoesntExistError)?;
+            } else if partnumber == 0 {
+                return Err(CopyError::PartitionNumberError)?;
+            } else if (src_parts[&partnumber_i].last_lba - src_parts[&partnumber_i].first_lba) > (dest_parts[&partnumber_i].last_lba - dest_parts[&partnumber_i].first_lba)  {
+                return Err(CopyError::DestinationPartitionTooSmall)?;
+            }
+
+            let output = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(destination)?;
+
+            setup_output(&output, &bmap, output.metadata()?)?;
+
+            let source_tar_const2: PathBuf = source_tar.clone();
+            let imgarchivefile2: std::fs::File = File::open(source_tar_const2).unwrap();
+            let ar2 = Box::leak(Box::new(Archive::new(imgarchivefile2)));
+
+            for file2 in ar2.entries().unwrap() {
+                // Make sure there wasn't an I/O error
+                let file2 = file2.unwrap();
+                if file2.header().path().unwrap() == source {
+
+                    let lz4_2 = Lz4Decoder::new(file2).unwrap();
+                    let mut dec2 = Decoder::new(Discarder::new(lz4_2));
+
+                    let srcpart = src_parts.get(&partnumber_i).unwrap();
+                    let destpart = dest_parts.get(&partnumber_i).unwrap();
+
+                    #[cfg(feature = "progress")]
+                    {
+                        let pb = setup_progress_bar(&bmap);
+                        bmap_parser::copypart(&mut dec2, &mut pb.wrap_write(&output), &bmap, &srcpart, &destpart)?;
+                        pb.finish_and_clear();
+                    }
+
+                    #[cfg(not(feature = "progress"))]
+                    {
+                        bmap_parser::copypart(&mut dec2, &mut &output, &bmap, &srcpart, &destpart)?;
+                    }
+                }
+            }
+
+            //let mut input = setup_local_input(&source)?;
+
+            println!("Done: Syncing...");
+            output.sync_all()?;
+
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!("Could not find image and / or bmap in tar"))
+}
+
 
 #[cfg(feature = "remote")]
 async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
