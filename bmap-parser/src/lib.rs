@@ -15,6 +15,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use gpt::{header, disk, partition};
 use gpt::partition::Partition;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::ops::Range;
 
 /// Trait that can only seek further forwards
 pub trait SeekForward {
@@ -59,6 +61,9 @@ pub enum CopyError {
     PartitionDoesntExistError,
     #[error("Destination partition is smaller than source partition")]
     DestinationPartitionTooSmall,
+    #[error("Error during GPT table copy")]
+    GPTCopyError,
+
 }
 
 pub fn copy<I, O>(input: &mut I, output: &mut O, map: &Bmap) -> Result<(), CopyError>
@@ -239,7 +244,7 @@ where
         let mut forward = range.offset() - position;
         let mut left_delta = 0;
         if part_range.start > source_range.start {
-            println!("Range start earlier than partition. Shifting copy start to +{:#?} ({:#?}). Start: {:#?} End: {:#?}", part_range.start - source_range.start, part_range.start, range.offset(), range.offset() + range.length());
+            //println!("Range start earlier than partition. Shifting copy start to +{:#?} ({:#?}). Start: {:#?} End: {:#?}", part_range.start - source_range.start, part_range.start, range.offset(), range.offset() + range.length());
             forward = part_range.start - position;
             left_delta += part_range.start - source_range.start;
         }
@@ -333,3 +338,151 @@ where
     }
     Ok(())
 }
+
+pub fn copygpt<I, O>(input: &mut I, output: &mut O, map: &Bmap, src_hdr: &gpt::header::Header) -> Result<(), CopyError>
+where
+    I: Read + SeekForward,
+    O: Read + Write + SeekForward,
+{
+
+    let sector_size = u64::from(gpt::disk::DEFAULT_SECTOR_SIZE);
+
+    let mut ranges: VecDeque<Range<u64>> = VecDeque::new();
+    
+    // copy protective MBR LBA
+    ranges.push_back(0..(1*sector_size));
+
+    // copy from gpt header start LBA to first usable LBA, indistinctive of partition start LBA
+    ranges.push_back((src_hdr.current_lba*sector_size)..(src_hdr.first_usable*sector_size));
+
+    // copy from gpt backup partitions table (last_usable + 1) LBA to backup header LBA (inclusive, so +1)
+    ranges.push_back(((src_hdr.last_usable+1)*sector_size)..((src_hdr.backup_lba+1)*sector_size));
+
+    println!("{:#?}", ranges);
+
+    let mut hasher = match map.checksum_type() {
+        HashType::Sha256 => Sha256::new(),
+    };
+
+    let mut v = Vec::new();
+    // TODO benchmark a reasonable size for this
+    v.resize(8 * 1024 * 1024, 0);
+
+    let buf = v.as_mut_slice();
+    let mut position = 0;
+    let mut forward = 0;
+    for range in map.block_map() {
+        let source_range = range.offset()..(range.offset() + range.length());
+        
+        //println!("New source range {:#?}", source_range);
+
+        // move to start of source block
+        forward = source_range.start - position;
+        
+        if forward > 0 {
+            input.seek_forward(forward).map_err(CopyError::ReadError)?;
+            output
+                .seek_forward(forward)
+                .map_err(CopyError::WriteError)?;
+            position += forward;
+            //println!("Moving forward to {:#?} (+{:#?})", position, forward);
+        }
+
+        if ranges.len() == 0 {
+            //println!("No more GPT blocks, we're done");
+            break;
+        }
+
+        let mut r = ranges.pop_front().unwrap();
+        
+        loop {
+            //println!("ranges {:#?}", ranges);
+            //println!("{:#?}..{:#?} ->  {:#?}", source_range.start, source_range.end, r);
+
+            // this one should never happen as blocks are in order
+            if source_range.start > r.end {
+                println!("Source block went past GPT block!!");
+                return Err(CopyError::GPTCopyError);
+            }
+
+            if (source_range.start < r.start) && (source_range.end < r.start) {
+                //println!("Block out of range!!");
+                ranges.push_front(r);
+                break; // next source block
+            }
+            
+            /*
+            if (source_range.start >= r.start) && (source_range.end <= r.end) {
+                println!("Block fully inside destination partition.");
+            }
+            */
+
+            let mut left_delta = 0;
+            if (r.start > position) {
+                //println!("Position is before GPT block. Shifting copy start to +{:#?} ({:#?}).", r.start - position, r.start);
+                forward = r.start - position;
+                left_delta += r.start - source_range.start;
+            }
+
+            if r.end < source_range.end {
+                //println!("Block finish later than GPT block. Shifting copy end to -{:#?} ({:#?}).", source_range.end - r.end, r.end);
+                left_delta += source_range.end - r.end;
+            }
+
+            let mut left = ((source_range.end - position) - left_delta) as usize;
+
+            input.seek_forward(forward).map_err(CopyError::ReadError)?;
+            output
+                .seek_forward(forward)
+                .map_err(CopyError::WriteError)?;
+            position += forward;
+
+            while left > 0 {
+                let toread = left.min(buf.len());
+                let r = input
+                    .read(&mut buf[0..toread])
+                    .map_err(CopyError::ReadError)?;
+                if r == 0 {
+                    return Err(CopyError::UnexpectedEof);
+                }
+                hasher.update(&buf[0..r]);
+                output
+                    .write_all(&buf[0..r])
+                    .map_err(CopyError::WriteError)?;
+                left -= r;
+
+                position += r as u64;
+            }
+
+            let digest = hasher.finalize_reset();
+
+            /*
+            if range.checksum().as_slice() != digest.as_slice() {
+                return Err(CopyError::ChecksumError);
+            }
+            */
+
+            if r.end > source_range.end {
+                //println!("GPT block finish later than block. Inserting new GPT block at beginning");
+                ranges.push_front((source_range.end)..(r.end));
+                break;
+            }
+
+            if source_range.end > r.end {
+                if ranges.len() == 0 {
+                    //println!("No more GPT blocks, we're done");
+                    break;
+                }
+
+                //println!("Data left in source block, move to next GPT block");
+                r = ranges.pop_front().unwrap();
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    Ok(())
+}
+

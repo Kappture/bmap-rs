@@ -77,10 +77,19 @@ struct CopyPart {
 }
 
 #[derive(Debug)]
+struct CopyGPT {
+    image: Image,
+    dest: PathBuf,
+    tar_inner_image: PathBuf,
+    nobmap: bool,
+}
+
+#[derive(Debug)]
 
 enum Subcommand {
     Copy(Copy),
-    CopyPart(CopyPart)
+    CopyPart(CopyPart),
+    CopyGPT(CopyGPT)
 }
 
 #[derive(Debug)]
@@ -110,6 +119,25 @@ impl Opts {
                  Command::new("copy-part")
                     .about("Copy image partition (GPT only) to block device or file")
                     .arg(arg!([PARTNUMBER]).required(true))
+                    .arg(arg!([IMAGE]).required(true))
+                    .arg(arg!([DESTINATION]).required(true))
+                    .arg(
+                        Arg::new("nobmap")
+                            .short('n')
+                            .long("nobmap")
+                            .action(ArgAction::SetTrue)
+                     )
+                    .arg(
+                        Arg::new("tar-inner-image")
+                           .short('i')
+                           .long("tar-inner-image")
+                           .default_value("")
+                    ),
+
+            )
+            .subcommand(
+                 Command::new("copy-gpt")
+                    .about("Copy image GPT header to block device or file")
                     .arg(arg!([IMAGE]).required(true))
                     .arg(arg!([DESTINATION]).required(true))
                     .arg(
@@ -168,6 +196,18 @@ impl Opts {
                     }
                 }),
             },
+            Some(("copy-gpt", sub_matches)) => Opts {
+                command: Subcommand::CopyGPT({
+                    CopyGPT {
+                        image: Image::Path(PathBuf::from(
+                                sub_matches.get_one::<String>("IMAGE").unwrap(),
+                            )),
+                        dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
+                        tar_inner_image: PathBuf::from(sub_matches.get_one::<String>("tar-inner-image").unwrap()),
+                        nobmap: sub_matches.get_flag("nobmap"),
+                    }
+                }),
+            },
             _ => unreachable!(
                 "Exhausted list of subcommands and subcommand_required prevents `None`"
             ),
@@ -204,6 +244,30 @@ fn find_remote_bmap(mut url: Url) -> Result<Url> {
     url.set_path(path.to_str().unwrap());
     Ok(url)
 }
+
+fn get_gpt_header(input: &mut Decoder) -> gpt::header::Header
+{
+    let mut v = Vec::new();
+
+    v.resize(4096 * 10, 0); // a LBA is 4096 bytes, partition table is usually at LBA 3, let's load 10 LBAs to be safe
+    let mut buf = v.as_mut_slice();
+
+    let r = input
+                .read(&mut buf)
+                .map_err(CopyError::ReadError);//?;
+
+    /*
+    if r == 0 {
+        return Err(CopyError::UnexpectedEof);
+    }
+    */
+
+    let mut c = Cursor::new(buf);
+    let lb_size = disk::DEFAULT_SECTOR_SIZE;
+    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
+    return hdr;
+}
+
 
 fn get_partitions(input: &mut Decoder) -> BTreeMap<u32, Partition>
 {
@@ -595,6 +659,182 @@ fn copy_local_part_from_tar(source_tar: PathBuf, source: PathBuf, destination: P
     Err(anyhow!("Could not find image and / or bmap in tar"))
 }
 
+async fn copygpt(c: CopyGPT) -> Result<()> {
+    /*
+    if c.nobmap {
+        return match c.image {
+            Image::Path(path) => copy_local_part_nobmap(path, c.dest, c.partnumber),
+            Image::Url(url) => copy_remote_part_nobmap(url, c.dest, c.partnumber).await,
+        };
+    }
+    */
+
+    match c.image {
+        Image::Path(path) => {
+            match path.extension().and_then(OsStr::to_str) {
+                Some("tar") => {
+                    #[cfg(feature = "tar")]
+                    {
+                        copy_local_gpt_from_tar(path, c.tar_inner_image, c.dest)
+                    }
+                    #[cfg(not(feature = "tar"))]
+                    {
+                        Err(FeatureError::TarNotSupported)?
+                    }
+                },
+                _ => copy_local_gpt(path, c.dest)
+            }
+        },
+        #[cfg(feature = "remote")]
+        Image::Url(url) => copy_remote_gpt(url, c.dest, c.partnumber).await
+    }
+
+}
+
+fn copy_local_gpt(source: PathBuf, destination: PathBuf) -> Result<()> {
+    ensure!(source.exists(), "Image file doesn't exist");
+    let bmap = find_bmap(&source).ok_or_else(|| anyhow!("Couldn't find bmap file"))?;
+    println!("Found bmap file: {}", bmap.display());
+
+    let mut b = File::open(&bmap).context("Failed to open bmap file")?;
+    let mut xml = String::new();
+    b.read_to_string(&mut xml)?;
+
+    let bmap = Bmap::from_xml(&xml)?;
+
+    let mut src_input = setup_local_input(&source)?;
+    let src_hdr = get_gpt_header(&mut src_input);
+    drop(src_input);
+    
+    println!("{:#?}", src_hdr);
+
+    let mut dst_input = setup_local_input(&destination)?;
+    let dst_hdr = get_gpt_header(&mut dst_input);
+    drop(dst_input);
+    
+    println!("{:#?}", dst_hdr);
+
+
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(destination)?;
+
+    setup_output(&output, &bmap, output.metadata()?)?;
+
+    let mut input = setup_local_input(&source)?;
+
+    #[cfg(feature = "progress")]
+    {
+        let pb = setup_progress_bar(&bmap);
+        bmap_parser::copygpt(&mut input, &mut pb.wrap_write(&output), &bmap, &src_hdr)?;
+        pb.finish_and_clear();
+    }
+
+    #[cfg(not(feature = "progress"))]
+    {
+        bmap_parser::copygpt(&mut input, &mut &output, &bmap, &src_hdr)?;
+    }
+
+    println!("Done: Syncing...");
+    output.sync_all()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "tar")]
+fn copy_local_gpt_from_tar(source_tar: PathBuf, source: PathBuf, destination: PathBuf) -> Result<()> {
+
+    ensure!(source_tar.exists(), "Tar file doesn't exist");
+
+    // look for fixed bmap name for the moment
+    let mut bmap_candidate_1 = source.to_path_buf();
+    bmap_candidate_1.set_extension("bmap");
+    println!("candidate 1 {:?}", bmap_candidate_1);
+
+    // look for bmap
+    let bmaparchivefile = File::open(source_tar.clone()).unwrap();
+    let mut a = Archive::new(bmaparchivefile);
+    let mut xml = String::new();
+    for file in a.entries().unwrap() {
+        // Make sure there wasn't an I/O error
+        let mut file = file.unwrap();
+
+        if file.header().path().unwrap() == bmap_candidate_1 {
+            println!("Found bmap file in tar: {}", bmap_candidate_1.display());
+            file.read_to_string(&mut xml)?;
+            break;
+        }
+
+    }
+    let bmap = Bmap::from_xml(&xml)?;
+
+    // look for image
+    let source_tar_const: PathBuf = source_tar.clone();
+    let imgarchivefile: std::fs::File = File::open(source_tar_const).unwrap();
+    let ar = Box::leak(Box::new(Archive::new(imgarchivefile)));
+
+    for file in ar.entries().unwrap() {
+        // Make sure there wasn't an I/O error
+        let file = file.unwrap();
+
+        if file.header().path().unwrap() == source {
+            println!("Found image file in tar");
+
+            //let mut src_input = setup_decoder(file., &source);
+            let lz4 = Lz4Decoder::new(file).unwrap();
+            let mut dec = Decoder::new(Discarder::new(lz4));
+            let src_hdr = get_gpt_header(&mut dec);
+            println!("{:#?}", src_hdr);
+
+            let mut dst_input = setup_local_input(&destination)?;
+            let dst_hdr = get_gpt_header(&mut dst_input);
+            drop(dst_input);
+            println!("{:#?}", dst_hdr);
+
+            let output = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(destination)?;
+
+            setup_output(&output, &bmap, output.metadata()?)?;
+
+            let source_tar_const2: PathBuf = source_tar.clone();
+            let imgarchivefile2: std::fs::File = File::open(source_tar_const2).unwrap();
+            let ar2 = Box::leak(Box::new(Archive::new(imgarchivefile2)));
+
+            for file2 in ar2.entries().unwrap() {
+                // Make sure there wasn't an I/O error
+                let file2 = file2.unwrap();
+                if file2.header().path().unwrap() == source {
+
+                    let lz4_2 = Lz4Decoder::new(file2).unwrap();
+                    let mut dec2 = Decoder::new(Discarder::new(lz4_2));
+
+                    #[cfg(feature = "progress")]
+                    {
+                        let pb = setup_progress_bar(&bmap);
+                        bmap_parser::copygpt(&mut dec2, &mut pb.wrap_write(&output), &bmap, &src_hdr)?;
+                        pb.finish_and_clear();
+                    }
+
+                    #[cfg(not(feature = "progress"))]
+                    {
+                        bmap_parser::copygpt(&mut dec2, &mut &output, &bmap, &src_hdr)?;
+                    }
+                }
+            }
+
+            println!("Done: Syncing...");
+            output.sync_all()?;
+
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!("Could not find image and / or bmap in tar"))
+}
+
 
 #[cfg(feature = "remote")]
 async fn copy_remote_input(source: Url, destination: PathBuf) -> Result<()> {
@@ -781,5 +1021,6 @@ async fn main() -> Result<()> {
     match opts.command {
         Subcommand::Copy(c) => copy(c).await,
         Subcommand::CopyPart(c) => copypart(c).await,
+        Subcommand::CopyGPT(c) => copygpt(c).await,
     }
 }
