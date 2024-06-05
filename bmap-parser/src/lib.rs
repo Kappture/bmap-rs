@@ -344,7 +344,6 @@ where
     I: Read + SeekForward,
     O: Read + Write + SeekForward,
 {
-
     let sector_size = u64::from(gpt::disk::DEFAULT_SECTOR_SIZE);
 
     let mut ranges: VecDeque<Range<u64>> = VecDeque::new();
@@ -370,14 +369,13 @@ where
 
     let buf = v.as_mut_slice();
     let mut position = 0;
-    let mut forward = 0;
     for range in map.block_map() {
         let source_range = range.offset()..(range.offset() + range.length());
         
         //println!("New source range {:#?}", source_range);
 
         // move to start of source block
-        forward = source_range.start - position;
+        let mut forward = source_range.start - position;
         
         if forward > 0 {
             input.seek_forward(forward).map_err(CopyError::ReadError)?;
@@ -418,7 +416,7 @@ where
             */
 
             let mut left_delta = 0;
-            if (r.start > position) {
+            if r.start > position {
                 //println!("Position is before GPT block. Shifting copy start to +{:#?} ({:#?}).", r.start - position, r.start);
                 forward = r.start - position;
                 left_delta += r.start - source_range.start;
@@ -453,14 +451,6 @@ where
 
                 position += r as u64;
             }
-
-            let digest = hasher.finalize_reset();
-
-            /*
-            if range.checksum().as_slice() != digest.as_slice() {
-                return Err(CopyError::ChecksumError);
-            }
-            */
 
             if r.end > source_range.end {
                 //println!("GPT block finish later than block. Inserting new GPT block at beginning");

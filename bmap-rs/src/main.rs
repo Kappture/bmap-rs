@@ -73,7 +73,6 @@ struct CopyPart {
     image: Image,
     dest: PathBuf,
     tar_inner_image: PathBuf,
-    nobmap: bool,
 }
 
 #[derive(Debug)]
@@ -81,7 +80,6 @@ struct CopyGPT {
     image: Image,
     dest: PathBuf,
     tar_inner_image: PathBuf,
-    nobmap: bool,
 }
 
 #[derive(Debug)]
@@ -122,12 +120,6 @@ impl Opts {
                     .arg(arg!([IMAGE]).required(true))
                     .arg(arg!([DESTINATION]).required(true))
                     .arg(
-                        Arg::new("nobmap")
-                            .short('n')
-                            .long("nobmap")
-                            .action(ArgAction::SetTrue)
-                     )
-                    .arg(
                         Arg::new("tar-inner-image")
                            .short('i')
                            .long("tar-inner-image")
@@ -140,12 +132,6 @@ impl Opts {
                     .about("Copy image GPT header to block device or file")
                     .arg(arg!([IMAGE]).required(true))
                     .arg(arg!([DESTINATION]).required(true))
-                    .arg(
-                        Arg::new("nobmap")
-                            .short('n')
-                            .long("nobmap")
-                            .action(ArgAction::SetTrue)
-                     )
                     .arg(
                         Arg::new("tar-inner-image")
                            .short('i')
@@ -192,7 +178,6 @@ impl Opts {
                             )),
                         dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
                         tar_inner_image: PathBuf::from(sub_matches.get_one::<String>("tar-inner-image").unwrap()),
-                        nobmap: sub_matches.get_flag("nobmap"),
                     }
                 }),
             },
@@ -204,7 +189,6 @@ impl Opts {
                             )),
                         dest: PathBuf::from(sub_matches.get_one::<String>("DESTINATION").unwrap()),
                         tar_inner_image: PathBuf::from(sub_matches.get_one::<String>("tar-inner-image").unwrap()),
-                        nobmap: sub_matches.get_flag("nobmap"),
                     }
                 }),
             },
@@ -252,7 +236,7 @@ fn get_gpt_header(input: &mut Decoder) -> gpt::header::Header
     v.resize(4096 * 10, 0); // a LBA is 4096 bytes, partition table is usually at LBA 3, let's load 10 LBAs to be safe
     let mut buf = v.as_mut_slice();
 
-    let r = input
+    let _ = input
                 .read(&mut buf)
                 .map_err(CopyError::ReadError);//?;
 
@@ -276,9 +260,9 @@ fn get_partitions(input: &mut Decoder) -> BTreeMap<u32, Partition>
     v.resize(4096 * 10, 0); // a LBA is 4096 bytes, partition table is usually at LBA 3, let's load 10 LBAs to be safe
     let mut buf = v.as_mut_slice();
 
-    let r = input
-                .read(&mut buf)
-                .map_err(CopyError::ReadError);//?;
+    let _ = input
+        .read(&mut buf)
+        .map_err(CopyError::ReadError);//?;
 
     /*
     if r == 0 {
@@ -426,14 +410,6 @@ async fn copy(c: Copy) -> Result<()> {
 }
 
 async fn copypart(c: CopyPart) -> Result<()> {
-    /*
-    if c.nobmap {
-        return match c.image {
-            Image::Path(path) => copy_local_part_nobmap(path, c.dest, c.partnumber),
-            Image::Url(url) => copy_remote_part_nobmap(url, c.dest, c.partnumber).await,
-        };
-    }
-    */
 
     match c.image {
         Image::Path(path) => {
@@ -660,14 +636,6 @@ fn copy_local_part_from_tar(source_tar: PathBuf, source: PathBuf, destination: P
 }
 
 async fn copygpt(c: CopyGPT) -> Result<()> {
-    /*
-    if c.nobmap {
-        return match c.image {
-            Image::Path(path) => copy_local_part_nobmap(path, c.dest, c.partnumber),
-            Image::Url(url) => copy_remote_part_nobmap(url, c.dest, c.partnumber).await,
-        };
-    }
-    */
 
     match c.image {
         Image::Path(path) => {
@@ -705,15 +673,17 @@ fn copy_local_gpt(source: PathBuf, destination: PathBuf) -> Result<()> {
     let mut src_input = setup_local_input(&source)?;
     let src_hdr = get_gpt_header(&mut src_input);
     drop(src_input);
-    
-    println!("{:#?}", src_hdr);
+    //println!("{:#?}", src_hdr);
 
     let mut dst_input = setup_local_input(&destination)?;
     let dst_hdr = get_gpt_header(&mut dst_input);
     drop(dst_input);
-    
-    println!("{:#?}", dst_hdr);
+    //println!("{:#?}", dst_hdr);
 
+    if src_hdr == dst_hdr {
+        println!("GPT tables are already the same!");
+        return Ok(())
+    }
 
     let output = std::fs::OpenOptions::new()
         .write(true)
@@ -785,12 +755,17 @@ fn copy_local_gpt_from_tar(source_tar: PathBuf, source: PathBuf, destination: Pa
             let lz4 = Lz4Decoder::new(file).unwrap();
             let mut dec = Decoder::new(Discarder::new(lz4));
             let src_hdr = get_gpt_header(&mut dec);
-            println!("{:#?}", src_hdr);
+            //println!("{:#?}", src_hdr);
 
             let mut dst_input = setup_local_input(&destination)?;
             let dst_hdr = get_gpt_header(&mut dst_input);
             drop(dst_input);
-            println!("{:#?}", dst_hdr);
+            //println!("{:#?}", dst_hdr);
+
+            if src_hdr == dst_hdr {
+                println!("GPT tables are already the same!");
+                return Ok(())
+            }
 
             let output = std::fs::OpenOptions::new()
                 .write(true)
