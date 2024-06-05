@@ -8,13 +8,10 @@ use futures::TryFutureExt;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use std::io::Cursor;
 use std::io::Result as IOResult;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use gpt::{header, disk, partition};
 use gpt::partition::Partition;
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::ops::Range;
 

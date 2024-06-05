@@ -1,15 +1,12 @@
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use bmap_parser::{AsyncDiscarder, Bmap, Discarder, SeekForward, CopyError};
+use anyhow::{anyhow, ensure, Context, Result};
+use bmap_parser::{Bmap, Discarder, SeekForward, CopyError};
 use clap::{arg, command, Arg, ArgAction, Command};
-use futures::TryStreamExt;
 use nix::unistd::ftruncate;
 use std::ffi::OsStr;
-use std::fmt::Write;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use tokio_util::compat::TokioAsyncReadCompatExt;
 use thiserror::Error;
 
 use std::io::Cursor;
