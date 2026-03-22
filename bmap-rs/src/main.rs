@@ -226,7 +226,7 @@ fn find_remote_bmap(mut url: Url) -> Result<Url> {
     Ok(url)
 }
 
-fn get_gpt_header(input: &mut Decoder) -> gpt::header::Header
+fn get_gpt_header(input: &mut Decoder) -> Option<gpt::header::Header>
 {
     let mut v = Vec::new();
 
@@ -245,7 +245,7 @@ fn get_gpt_header(input: &mut Decoder) -> gpt::header::Header
 
     let mut c = Cursor::new(buf);
     let lb_size = disk::DEFAULT_SECTOR_SIZE;
-    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).unwrap();
+    let hdr = header::read_header_from_arbitrary_device(&mut c, lb_size).ok();
     return hdr;
 }
 
@@ -668,7 +668,7 @@ fn copy_local_gpt(source: PathBuf, destination: PathBuf) -> Result<()> {
     let bmap = Bmap::from_xml(&xml)?;
 
     let mut src_input = setup_local_input(&source)?;
-    let src_hdr = get_gpt_header(&mut src_input);
+    let src_hdr = get_gpt_header(&mut src_input).ok_or_else(|| anyhow!("Source has no valid GPT header"))?;
     drop(src_input);
     //println!("{:#?}", src_hdr);
 
@@ -677,7 +677,7 @@ fn copy_local_gpt(source: PathBuf, destination: PathBuf) -> Result<()> {
     drop(dst_input);
     //println!("{:#?}", dst_hdr);
 
-    if src_hdr == dst_hdr {
+    if dst_hdr.as_ref() == Some(&src_hdr) {
         println!("GPT tables are already the same!");
         return Ok(())
     }
@@ -751,7 +751,7 @@ fn copy_local_gpt_from_tar(source_tar: PathBuf, source: PathBuf, destination: Pa
             //let mut src_input = setup_decoder(file., &source);
             let lz4 = Lz4Decoder::new(file).unwrap();
             let mut dec = Decoder::new(Discarder::new(lz4));
-            let src_hdr = get_gpt_header(&mut dec);
+            let src_hdr = get_gpt_header(&mut dec).ok_or_else(|| anyhow!("Source has no valid GPT header"))?;
             //println!("{:#?}", src_hdr);
 
             let mut dst_input = setup_local_input(&destination)?;
@@ -759,7 +759,7 @@ fn copy_local_gpt_from_tar(source_tar: PathBuf, source: PathBuf, destination: Pa
             drop(dst_input);
             //println!("{:#?}", dst_hdr);
 
-            if src_hdr == dst_hdr {
+            if dst_hdr.as_ref() == Some(&src_hdr) {
                 println!("GPT tables are already the same!");
                 return Ok(())
             }
